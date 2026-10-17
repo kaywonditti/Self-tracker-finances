@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <!-- Sicurezza: l'app può caricare solo i propri file e NON può collegarsi a nessun server esterno -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; worker-src 'self'; manifest-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Finanze">
+  <title>Le mie finanze</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Schermata di blocco -->
+  <section id="lock" class="lock" aria-labelledby="lock-title">
+    <div class="lock-box">
+      <img src="icons/icon-192.png" alt="" class="lock-logo" width="72" height="72">
+      <h1 id="lock-title">Le mie finanze</h1>
+      <p id="lock-text" class="muted">Inserisci la password per aprire i tuoi dati.</p>
+      <div class="group">
+        <label class="group-field">
+          <span class="sr-only">Password</span>
+          <input id="pw1" type="password" autocomplete="current-password" placeholder="Password">
+        </label>
+        <label class="group-field" id="pw2-wrap" hidden>
+          <span class="sr-only">Ripeti la password</span>
+          <input id="pw2" type="password" autocomplete="new-password" placeholder="Ripeti la password">
+        </label>
+      </div>
+      <p id="lock-error" class="error" role="alert"></p>
+      <button id="lock-btn" class="btn primary wide">Sblocca</button>
+      <p id="lock-note" class="small muted"></p>
+    </div>
+  </section>
+
+  <!-- Applicazione -->
+  <div id="app" hidden>
+    <header class="nav">
+      <div class="nav-inner">
+        <div class="nav-titles">
+          <p id="view-name" class="nav-eyebrow">Riepilogo</p>
+          <label class="month-pick" id="month-pick">
+            <span class="sr-only">Mese</span>
+            <select id="month-select"></select>
+            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </label>
+          <h1 id="view-title" class="large-title" hidden></h1>
+        </div>
+        <div class="nav-actions">
+          <button id="import-btn" class="nav-btn" title="Importa un estratto conto PDF" aria-label="Importa PDF">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 11v6M9 14h6"/></svg>
+            <span class="nav-btn-label">Importa</span>
+          </button>
+          <button id="lock-now" class="nav-btn" title="Blocca l'app" aria-label="Blocca l'app">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <!-- Riepilogo -->
+      <section id="view-summary" class="view">
+        <div id="empty" class="empty card" hidden>
+          <h2>Nessun movimento ancora</h2>
+          <p>Carica l'estratto conto in PDF di un mese: i movimenti vengono letti qui sul dispositivo e salvati cifrati con la tua password.</p>
+          <button id="empty-import" class="btn primary">Importa il primo PDF</button>
+        </div>
+        <div id="summary-content">
+          <div class="card result">
+            <p id="result-label" class="result-label"></p>
+            <p id="result-value" class="result-value"></p>
+            <p id="savings" class="savings"></p>
+            <dl class="result-split">
+              <div><dt><span class="sw plus"></span>Entrate</dt><dd id="tot-in"></dd></div>
+              <div><dt><span class="sw minus"></span>Uscite</dt><dd id="tot-out"></dd></div>
+            </dl>
+          </div>
+
+          <h2 class="section-title">Questo mese</h2>
+          <div class="card">
+            <h3>Andamento nel mese</h3>
+            <p class="small muted">Somma progressiva di entrate e uscite, giorno per giorno.</p>
+            <div class="chart-box"><canvas id="chart-trend" role="img" aria-label="Andamento giornaliero del mese"></canvas></div>
+          </div>
+
+          <div class="card">
+            <h3>Spese per categoria</h3>
+            <p class="small muted">Tocca una categoria per vederne i movimenti.</p>
+            <div class="cat-layout">
+              <div class="chart-box donut"><canvas id="chart-cats" role="img" aria-label="Spese per categoria"></canvas></div>
+              <ul id="cat-totals" class="cat-totals"></ul>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Calendario delle spese</h3>
+            <p class="small muted">Più il giorno è scuro, più hai speso. Toccalo per vederne i movimenti.</p>
+            <div id="calendar" class="calendar"></div>
+            <div class="cal-legend small muted" aria-hidden="true">
+              <span>meno</span><span class="cal-scale" id="cal-scale"></span><span>più</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Dove spendi di più</h3>
+            <p class="small muted">I negozi e i beneficiari con la spesa più alta del mese.</p>
+            <div class="chart-box auto" id="top-box"><canvas id="chart-top" role="img" aria-label="Negozi con la spesa più alta"></canvas></div>
+            <p id="top-empty" class="muted small" hidden>Nessuna spesa in questo mese.</p>
+          </div>
+
+          <h2 class="section-title">Nel tempo</h2>
+          <div class="card">
+            <h3>Questo mese rispetto alla media</h3>
+            <p id="avg-note" class="small muted"></p>
+            <div class="chart-box auto" id="avg-box"><canvas id="chart-avg" role="img" aria-label="Spese del mese rispetto alla media"></canvas></div>
+          </div>
+
+          <div class="card">
+            <h3>Categorie mese per mese</h3>
+            <p class="small muted">Tocca un nome nella legenda per nasconderlo o mostrarlo; tocca una barra per vederne i movimenti.</p>
+            <div class="chart-box tall"><canvas id="chart-stack" role="img" aria-label="Spese per categoria nei vari mesi"></canvas></div>
+          </div>
+
+          <div class="card">
+            <h3>Entrate e uscite per mese</h3>
+            <p class="small muted">Tocca un mese per aprirlo.</p>
+            <div class="chart-box"><canvas id="chart-months" role="img" aria-label="Entrate e uscite dei vari mesi"></canvas></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Movimenti -->
+      <section id="view-moves" class="view" hidden>
+        <div class="toolbar">
+          <label class="field inline">
+            <span>Categoria</span>
+            <select id="moves-filter"></select>
+          </label>
+          <label class="field inline grow">
+            <span>Cerca</span>
+            <input id="moves-search" type="search" placeholder="Es. Esselunga">
+          </label>
+        </div>
+        <div id="moves-chips" class="chips"></div>
+        <p class="small muted hint">Cambia la categoria di un movimento: l'app la ricorderà per i movimenti con la stessa descrizione.</p>
+        <ul id="moves-list" class="moves"></ul>
+      </section>
+
+      <!-- Categorie -->
+      <section id="view-cats" class="view" hidden>
+        <p class="small muted hint">Ogni categoria raccoglie i movimenti che contengono una delle sue parole chiave nella descrizione o nella causale. Separa le parole chiave con una virgola.</p>
+        <div id="cats-editor"></div>
+        <div class="row-actions">
+          <button id="add-cat" class="btn">Aggiungi categoria</button>
+          <button id="save-cats" class="btn primary">Salva e ricategorizza</button>
+        </div>
+        <div class="card" id="learned-panel">
+          <h3>Associazioni imparate</h3>
+          <p class="small muted">Create quando correggi a mano la categoria di un movimento.</p>
+          <ul id="learned-list" class="learned"></ul>
+        </div>
+      </section>
+
+      <!-- Backup e sicurezza -->
+      <section id="view-settings" class="view" hidden>
+        <div class="card">
+          <h3>Backup cifrato</h3>
+          <p>Il backup contiene tutti i movimenti ed è protetto dalla tua password. Usalo per portare i dati dal PC all'iPhone (e viceversa) o per conservarne una copia, anche su OneDrive.</p>
+          <div class="row-actions">
+            <button id="export-btn" class="btn primary">Esporta backup</button>
+            <button id="import-backup-btn" class="btn">Importa backup</button>
+          </div>
+          <p class="small muted">L'importazione unisce i dati del backup a quelli già presenti, senza duplicati.</p>
+        </div>
+        <div class="card">
+          <h3>Password</h3>
+          <div class="row-actions">
+            <button id="change-pw-btn" class="btn">Cambia password</button>
+          </div>
+          <p class="small muted">L'app si blocca da sola dopo 5 minuti di inattività. Se dimentichi la password i dati non sono recuperabili: conserva un backup.</p>
+        </div>
+        <div class="card">
+          <h3>Diagnostica lettura PDF</h3>
+          <p class="small muted">Se un estratto conto non viene letto bene, qui vedi le righe di testo che l'app trova nel PDF.</p>
+          <div class="row-actions">
+            <button id="diag-btn" class="btn">Analizza un PDF</button>
+          </div>
+        </div>
+        <div class="card danger-zone">
+          <h3>Elimina tutti i dati</h3>
+          <p class="small muted">Cancella movimenti, categorie e password da questo dispositivo.</p>
+          <button id="wipe-btn" class="btn danger">Elimina tutto</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- Barra delle sezioni, in basso come nelle app iPhone -->
+    <nav class="tabbar" role="tablist" aria-label="Sezioni">
+      <button role="tab" data-view="summary" aria-selected="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9l7.8 4.5"/><circle cx="12" cy="12" r="9"/></svg>
+        <span>Riepilogo</span>
+      </button>
+      <button role="tab" data-view="moves" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg>
+        <span>Movimenti</span>
+      </button>
+      <button role="tab" data-view="cats" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9-9-9z"/><circle cx="8" cy="8" r="1.5"/></svg>
+        <span>Categorie</span>
+      </button>
+      <button role="tab" data-view="settings" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+        <span>Backup</span>
+      </button>
+    </nav>
+  </div>
+
+  <dialog id="modal">
+    <div class="modal-inner">
+      <div class="sheet-grabber" aria-hidden="true"></div>
+      <h2 id="modal-title"></h2>
+      <div id="modal-body"></div>
+      <div id="modal-actions" class="row-actions end"></div>
+    </div>
+  </dialog>
+
+  <input id="pdf-input" type="file" accept="application/pdf,.pdf" multiple hidden>
+  <input id="backup-input" type="file" accept=".fin,.json,application/json" hidden>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="lib/chart.umd.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
