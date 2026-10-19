@@ -219,8 +219,11 @@ const STOP = new Set(('PAGAMENTO PAGAM PAG POS CARTA CARTE DI DEL DELLA DEI DA A
   'N NR NUM RIF COD ID CRO TRN DATA ORE H ESTERO ITA IT CONTACTLESS MASTERCARD VISA MAESTRO DEBIT PAGOBANCOMAT NEXI ' +
   'CIRCUITO INTERNAZIONALE SRL SPA S R L P IL LA LO E CON TRAMITE WEB INTERNET ISTANTANEO ORDINE MANDATO').split(' '));
 
+// Parte fissa dei pagamenti con carta ("Operazione ... del gg.mm.aa hh:mm Carta *NNNN"): non è il nome del negozio
+const RE_CARD_PREFIX = /^.*?\bDEL\s+\d{1,2}[./]\d{1,2}[./]\d{2,4}(?:\s+\d{1,2}[:.]\d{2})?\s+(?:\S+\s+)?\*+\d{3,4}\b/i;
 function merchantKey(tx) {
-  for (const src of [tx.desc, tx.causale]) {
+  const desc = (tx.desc || '').replace(RE_CARD_PREFIX, '');
+  for (const src of [desc, tx.causale]) {
     const words = norm(src).trim().split(' ').filter((w) => w && !/\d/.test(w) && !STOP.has(w) && w.length > 1);
     if (words.length) return words.slice(0, 3).join(' ');
   }
@@ -299,9 +302,12 @@ async function extractRows(file) {
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const tc = await page.getTextContent();
-      const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({
-        x: it.transform[4], y: it.transform[5], w: it.width || 0, h: Math.abs(it.height || it.transform[3] || 8), str: it.str,
-      }));
+      // Coordinate come appaiono a schermo: alcune banche producono pagine ruotate (orizzontali)
+      const vp = page.getViewport({ scale: 1 });
+      const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => {
+        const m = window.pdfjsLib.Util.transform(vp.transform, it.transform);
+        return { x: m[4], y: vp.height - m[5], w: it.width || 0, h: Math.abs(it.height || it.transform[3] || 8), str: it.str };
+      });
       items.sort((a, b) => b.y - a.y || a.x - b.x);
       const pageRows = [];
       for (const it of items) {
@@ -318,7 +324,7 @@ async function extractRows(file) {
           const re = /\S+/g; let m;
           while ((m = re.exec(it.str))) {
             const x = it.x + (it.str.length ? it.w * (m.index / it.str.length) : 0);
-            r.tokens.push({ x, t: m[0] });
+            r.tokens.push({ x, y: it.y, h: it.h, t: m[0] });
           }
         }
         r.text = r.tokens.map((t) => t.t).join(' ');
@@ -340,16 +346,72 @@ function readHeader(row) {
   return { importo: find(/^IMPORTO/), causale: find(/^CAUSALE/), descrizione: find(/^DESCRIZIONE/), valuta: find(/^VALUTA/) };
 }
 
+/* Assegna le righe di testo di una colonna ai movimenti della stessa pagina.
+   Funziona sia se il testo sta sotto la riga con le date sia se è centrato in verticale:
+   tra due movimenti il confine è lo spazio vuoto più ampio tra le righe. */
+function assignColumn(anchors, tokens, field) {
+  if (!anchors.length || !tokens.length) return;
+  const lines = [];
+  for (const t of [...tokens].sort((a, b) => b.y - a.y || a.x - b.x)) {
+    const ln = lines.find((l) => Math.abs(l.y - t.y) <= 1.5);
+    if (ln) ln.tokens.push(t); else lines.push({ y: t.y, h: t.h, tokens: [t] });
+  }
+  lines.sort((a, b) => b.y - a.y);
+  const parts = anchors.map(() => []);
+  const near = (ln, a) => Math.abs(ln.y - a.y) <= Math.max(1.5, ln.h * 0.45);
+  const step = (ln) => Math.max(ln.h, 6) * 1.8;   // distanza massima tra righe dello stesso movimento
+  const first = anchors[0]; const lastA = anchors[anchors.length - 1];
+  // Righe sopra il primo movimento (solo se attaccate) e sotto l'ultimo
+  let edge = first.y;
+  for (const ln of lines.filter((l) => l.y > first.y && !near(l, first)).reverse()) {
+    if (ln.y - edge > step(ln)) break;
+    parts[0].push(ln); edge = ln.y;
+  }
+  edge = lastA.y;
+  for (const ln of lines.filter((l) => l.y < lastA.y && !near(l, lastA))) {
+    if (edge - ln.y > step(ln)) break;
+    parts[anchors.length - 1].push(ln); edge = ln.y;
+  }
+  anchors.forEach((a, i) => {
+    for (const ln of lines) if (near(ln, a)) parts[i].push(ln);
+    const b = anchors[i + 1];
+    if (!b) return;
+    const mid = lines.filter((l) => l.y < a.y && l.y > b.y && !near(l, a) && !near(l, b));
+    const ys = [a.y, ...mid.map((l) => l.y), b.y];
+    let cut = 0; let best = -1;
+    for (let k = 0; k < ys.length - 1; k++) { const g = ys[k] - ys[k + 1]; if (g >= best) { best = g; cut = k; } }
+    mid.forEach((l, k) => parts[k < cut ? i : i + 1].push(l));
+  });
+  anchors.forEach((a, i) => {
+    const text = parts[i].sort((p, q) => q.y - p.y)
+      .map((l) => l.tokens.sort((p, q) => p.x - q.x).map((t) => t.t).join(' ')).join(' ');
+    a.tx[field] = text;
+  });
+}
+
 function parseStatement(rows) {
   const found = [];
   let header = null;
-  let last = null;      // ultimo movimento letto (per le descrizioni su più righe)
-  let lastRow = null;
   const warnings = [];
+  let page = 0;
+  let anchors = [];     // movimenti della pagina corrente, con la loro riga
+  let textTok = [];     // parole delle colonne Causale/Descrizione della pagina corrente
+
+  // Assegna il testo raccolto ai movimenti (a fine pagina, o prima di un'intestazione / riga di saldo)
+  const flushPage = () => {
+    if (header && header.descrizione != null) {
+      assignColumn(anchors, textTok.filter((t) => t.x < header.descrizione - 3), 'causale');
+      assignColumn(anchors, textTok.filter((t) => t.x >= header.descrizione - 3), 'desc');
+    } else {
+      assignColumn(anchors, textTok, 'desc');
+    }
+    anchors = []; textTok = [];
+  };
 
   for (const row of rows) {
+    if (row.page !== page) { flushPage(); page = row.page; }
     const hd = readHeader(row);
-    if (hd) { header = hd; last = null; continue; }
+    if (hd) { flushPage(); header = hd; continue; }
     const textStart = header ? Math.min(...[header.causale, header.descrizione].filter((v) => v != null)) : null;
     const tk = row.tokens;
 
@@ -363,7 +425,6 @@ function parseStatement(rows) {
       }
     }
 
-    let tx = null;
     if (dates.length) {
       let i = dates[dates.length - 1].i + 1;
       let sign = '';
@@ -378,49 +439,31 @@ function parseStatement(rows) {
       }
       if (amount !== null && (textStart == null || tk[amtIdx].x < textStart - 3)) {
         const rest = tk.slice(amtIdx + 1).filter((t) => t.t !== '€' && !/^EUR$/i.test(t.t));
-        let causale = []; let desc = [];
-        if (header && header.descrizione != null) {
-          for (const t of rest) (t.x >= header.descrizione - 3 ? desc : causale).push(t.t);
-        } else desc = rest.map((t) => t.t);
-        tx = {
+        const tx = {
           date: dates[0].d,
           valuta: dates[1] ? dates[1].d : dates[0].d,
           amount: Math.round(amount * 100) / 100,
-          causale: causale.join(' '),
-          desc: desc.join(' '),
+          causale: '',
+          desc: '',
           twoDates: dates.length === 2,
-          textX: rest.length ? rest[0].x : null,
         };
+        const limit = textStart != null ? textStart - 3 : (rest.length ? rest[0].x - 3 : Infinity);
+        found.push(tx); anchors.push({ tx, y: tk[dates[0].i].y, limit });
+        textTok.push(...tk.filter((t) => t.x >= limit && !(t.t === '€' || /^EUR$/i.test(t.t))));
+        continue;
       }
     }
 
-    if (tx) {
-      found.push(tx); last = tx; lastRow = row;
+    // Altre righe: testo che continua nelle colonne Causale/Descrizione, oppure saldo / piè di pagina
+    const limit = textStart != null ? textStart - 3 : (anchors.length ? Math.min(...anchors.map((a) => a.limit)) : Infinity);
+    const left = tk.filter((t) => t.x < limit);
+    if (left.length && (RE_FOOTER.test(norm(left.map((t) => t.t).join(' '))) || left.some((t) => parseAmount(t.t) !== null))) {
+      flushPage();
       continue;
     }
-
-    // Riga di continuazione della descrizione?
-    if (last && lastRow && row.page === lastRow.page && (lastRow.y - row.y) <= Math.max(row.h, lastRow.h) * 2.6) {
-      if (RE_FOOTER.test(norm(row.text))) { last = null; continue; }
-      const limit = textStart != null ? textStart - 3 : (last.textX != null ? last.textX - 3 : Infinity);
-      const right = tk.filter((t) => t.x >= limit);
-      const leftHasAmount = tk.some((t) => t.x < limit && parseAmount(t.t) !== null);
-      if (leftHasAmount) { last = null; continue; }
-      if (right.length) {
-        if (header && header.descrizione != null) {
-          const c = right.filter((t) => t.x < header.descrizione - 3).map((t) => t.t).join(' ');
-          const d = right.filter((t) => t.x >= header.descrizione - 3).map((t) => t.t).join(' ');
-          if (c) last.causale = (last.causale + ' ' + c).trim();
-          if (d) last.desc = (last.desc + ' ' + d).trim();
-        } else {
-          last.desc = (last.desc + ' ' + right.map((t) => t.t).join(' ')).trim();
-        }
-      }
-      lastRow = row;
-    } else {
-      last = null;
-    }
+    textTok.push(...tk.filter((t) => t.x >= limit));
   }
+  flushPage();
 
   // Se esistono righe con due date, scarta quelle con una sola (di solito saldi o totali)
   let result = found;
@@ -431,7 +474,7 @@ function parseStatement(rows) {
   if (result.length && !header) {
     warnings.push("Non ho trovato l'intestazione della tabella: causale e descrizione sono state unite in un solo campo.");
   }
-  return { tx: result.map(({ twoDates, textX, ...t }) => t), warnings };
+  return { tx: result.map(({ twoDates, ...t }) => t), warnings };
 }
 
 async function assignIds(list) {

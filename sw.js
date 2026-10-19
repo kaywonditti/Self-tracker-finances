@@ -1,6 +1,6 @@
 /* Service worker: conserva una copia dei file dell'app per farla funzionare offline.
    Non gestisce né vede i tuoi dati, che restano cifrati nell'archivio del browser. */
-const CACHE = 'finanze-v4';
+const CACHE = 'finanze-v5';
 const FILES = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'lib/chart.umd.js', 'lib/pdf.min.js', 'lib/pdf.worker.min.js',
